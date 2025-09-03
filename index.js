@@ -11,7 +11,7 @@ const isAdmin = (ctx) => (ctx.from?.username || '').toLowerCase() === ADMIN
 
 // /start
 bot.start(ctx =>
-  ctx.reply('👋 ¡Bienvenido a TechAcademy!\nUsa /premium, /pago, /payoneer o /help')
+  ctx.reply('👋 ¡Bienvenido a TechAcademy!\nUsa /premium, /help')
 )
 
 // /free
