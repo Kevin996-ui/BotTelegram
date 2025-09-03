@@ -3,15 +3,15 @@ const { Telegraf, Markup } = require('telegraf')
 
 const bot = new Telegraf(process.env.BOT_TOKEN)
 const ADMIN = (process.env.ADMIN_USERNAME || '').toLowerCase()
+const WEBHOOK_MODE = String(process.env.WEBHOOK_MODE || '').toLowerCase() === 'true'
 
 // Estado simple por usuario para pedir email de Payoneer
 const state = new Map() // userId -> 'await_email'
-
 const isAdmin = (ctx) => (ctx.from?.username || '').toLowerCase() === ADMIN
 
 // /start
 bot.start(ctx =>
-  ctx.reply('👋 ¡Bienvenido a TechAcademy!\nUsa /premium o /help')
+  ctx.reply('👋 ¡Bienvenido a TechAcademy!\nUsa /premium, /pago, /payoneer o /help')
 )
 
 // /free
@@ -42,7 +42,7 @@ bot.command('pago', ctx =>
 bot.command('payoneer', async (ctx) => {
   state.set(ctx.from.id, 'await_email')
   await ctx.reply(
-    '✉️ Por favor, envía tu *correo electrónico* para generar el cobro Payoneer por **$5 USD**.\n' +
+    '✉️ Envía tu *correo electrónico* para generar el cobro Payoneer por **$5 USD**.\n' +
     'Ejemplo: correo@dominio.com\n\n' +
     'Si te equivocaste, usa /cancel para cancelar.',
     { parse_mode: 'Markdown' }
@@ -62,14 +62,12 @@ bot.on('text', async (ctx) => {
 
   const msg = (ctx.message.text || '').trim()
   const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(msg)
-
   if (!isEmail) {
     return ctx.reply('⚠️ Ese no parece un correo válido. Intenta de nuevo o usa /cancel.')
   }
 
   // OK: notificamos al admin y confirmamos al usuario
   state.delete(ctx.from.id)
-
   await ctx.reply('✅ Gracias. Te enviaremos un enlace de pago de Payoneer por $5 a ese correo en breve.')
 
   const u = ctx.from
@@ -100,11 +98,37 @@ bot.command('help', ctx =>
   )
 )
 
+// === Arranque: polling (local/worker) o webhook (web service) ===
 ;(async () => {
   try {
-    await bot.telegram.deleteWebhook()
-    await bot.launch({ dropPendingUpdates: true })
-    console.log('✅ Bot ON (long polling)')
+    if (WEBHOOK_MODE) {
+      // Modo WEBHOOK (para Web Service en Render)
+      const express = require('express')
+      const app = express()
+      app.use(express.json())
+
+      const SECRET = process.env.WEBHOOK_SECRET || 'hook'
+      const PUBLIC_URL = process.env.PUBLIC_URL
+      const PORT = process.env.PORT || 3000
+
+      if (!PUBLIC_URL) {
+        throw new Error('Falta PUBLIC_URL para webhook.')
+      }
+
+      // Registrar webhook
+      await bot.telegram.setWebhook(`${PUBLIC_URL}/${SECRET}`)
+      // Ruta webhook
+      app.post(`/${SECRET}`, (req, res) => bot.handleUpdate(req.body, res))
+      // Salud
+      app.get('/', (_, res) => res.send('OK'))
+
+      app.listen(PORT, () => console.log(`✅ Webhook ON en :${PORT}`))
+    } else {
+      // Modo POLLING (local o Background Worker)
+      await bot.telegram.deleteWebhook()
+      await bot.launch({ dropPendingUpdates: true })
+      console.log('✅ Bot ON (long polling)')
+    }
   } catch (e) {
     console.error('❌ Error al iniciar bot:', e)
   }
@@ -112,3 +136,4 @@ bot.command('help', ctx =>
 
 process.once('SIGINT', () => bot.stop('SIGINT'))
 process.once('SIGTERM', () => bot.stop('SIGTERM'))
+
