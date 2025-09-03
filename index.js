@@ -2,16 +2,26 @@ require('dotenv').config()
 const { Telegraf, Markup } = require('telegraf')
 
 const bot = new Telegraf(process.env.BOT_TOKEN)
+
+// Admin por username o chat_id (mejor usar ambos si puedes)
 const ADMIN = (process.env.ADMIN_USERNAME || '').toLowerCase()
+const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID // ej. 123456789
 const WEBHOOK_MODE = String(process.env.WEBHOOK_MODE || '').toLowerCase() === 'true'
 
 // Estado simple por usuario para pedir email de Payoneer
 const state = new Map() // userId -> 'await_email'
 const isAdmin = (ctx) => (ctx.from?.username || '').toLowerCase() === ADMIN
 
+function adminTargetFallback(ctx) {
+  // Prioridad: chat_id explícito -> @username -> id del usuario que escribe
+  if (ADMIN_CHAT_ID) return ADMIN_CHAT_ID
+  if (ADMIN) return `@${ADMIN}`
+  return ctx?.from?.id
+}
+
 // /start
 bot.start(ctx =>
-  ctx.reply('👋 ¡Bienvenido a TechAcademy!\nUsa /premium, /help')
+  ctx.reply('👋 ¡Bienvenido a TechAcademy!\nUsa /premium o /help')
 )
 
 // /free
@@ -71,7 +81,6 @@ bot.on('text', async (ctx) => {
   await ctx.reply('✅ Gracias. Te enviaremos un enlace de pago de Payoneer por $5 a ese correo en breve.')
 
   const u = ctx.from
-  const adminTarget = ADMIN ? `@${ADMIN}` : u.id // fallback
   const info =
     `📬 *Solicitud Payoneer*\n` +
     `• Usuario: ${u.first_name || ''} ${u.last_name || ''} (@${u.username || 'sin_username'})\n` +
@@ -80,7 +89,7 @@ bot.on('text', async (ctx) => {
     `• Monto: USD 5\n\n` +
     `Crea el Payment Request en Payoneer y luego otorga acceso.\n`
   try {
-    await bot.telegram.sendMessage(adminTarget, info, { parse_mode: 'Markdown' })
+    await bot.telegram.sendMessage(adminTargetFallback(ctx), info, { parse_mode: 'Markdown' })
   } catch (e) {
     console.error('No pude notificar al admin:', e)
   }
@@ -99,10 +108,11 @@ bot.command('help', ctx =>
 )
 
 // === Arranque: polling (local/worker) o webhook (web service) ===
+let launchedPolling = false
+
 ;(async () => {
   try {
     if (WEBHOOK_MODE) {
-      // Modo WEBHOOK (para Web Service en Render)
       const express = require('express')
       const app = express()
       app.use(express.json())
@@ -110,23 +120,30 @@ bot.command('help', ctx =>
       const SECRET = process.env.WEBHOOK_SECRET || 'hook'
       const PUBLIC_URL = process.env.PUBLIC_URL
       const PORT = process.env.PORT || 3000
+      if (!PUBLIC_URL) throw new Error('Falta PUBLIC_URL para webhook.')
 
-      if (!PUBLIC_URL) {
-        throw new Error('Falta PUBLIC_URL para webhook.')
+      // setWebhook con reintento simple ante ETIMEDOUT
+      const setHook = async (retries = 2) => {
+        try {
+          await bot.telegram.setWebhook(`${PUBLIC_URL}/${SECRET}`)
+        } catch (e) {
+          if ((e.code === 'ETIMEDOUT' || e.errno === 'ETIMEDOUT') && retries > 0) {
+            console.warn('setWebhook ETIMEDOUT, reintentando...')
+            return setHook(retries - 1)
+          }
+          throw e
+        }
       }
+      await setHook()
 
-      // Registrar webhook
-      await bot.telegram.setWebhook(`${PUBLIC_URL}/${SECRET}`)
-      // Ruta webhook
       app.post(`/${SECRET}`, (req, res) => bot.handleUpdate(req.body, res))
-      // Salud
       app.get('/', (_, res) => res.send('OK'))
 
       app.listen(PORT, () => console.log(`✅ Webhook ON en :${PORT}`))
     } else {
-      // Modo POLLING (local o Background Worker)
       await bot.telegram.deleteWebhook()
       await bot.launch({ dropPendingUpdates: true })
+      launchedPolling = true
       console.log('✅ Bot ON (long polling)')
     }
   } catch (e) {
@@ -134,6 +151,10 @@ bot.command('help', ctx =>
   }
 })()
 
-process.once('SIGINT', () => bot.stop('SIGINT'))
-process.once('SIGTERM', () => bot.stop('SIGTERM'))
-
+// Solo detener si estaba en polling
+process.once('SIGINT', () => {
+  if (launchedPolling) bot.stop('SIGINT')
+})
+process.once('SIGTERM', () => {
+  if (launchedPolling) bot.stop('SIGTERM')
+})
